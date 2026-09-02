@@ -27,6 +27,10 @@ TIMEOUT      = 25
 LISTEN_BACKLOG   = 4096
 MAX_CONCURRENT   = 5000   # semaphore cap — tune up/down based on load
 
+# ── proxy credentials (change these) ─────────────────────────────────────────
+PROXY_USER = "electra"
+PROXY_PASS = "ElectraOp272"
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)-7s %(message)s",
@@ -59,6 +63,30 @@ _HOP = {
     "connection", "keep-alive", "proxy-connection",
     "te", "transfer-encoding", "upgrade", "proxy-authorization",
 }
+
+import base64
+
+# ── auth ──────────────────────────────────────────────────────────────────────
+_EXPECTED_CRED = base64.b64encode(f"{PROXY_USER}:{PROXY_PASS}".encode()).decode()
+
+_407 = (
+    b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+    b"Proxy-Authenticate: Basic realm=\"RotatingProxy\"\r\n"
+    b"Content-Length: 0\r\n"
+    b"Connection: close\r\n\r\n"
+)
+
+def _auth_ok(headers: dict) -> bool:
+    """
+    Validates Proxy-Authorization: Basic base64(user:pass).
+    *checks the ticket at the door — wrong cred, no entry*
+    Returns True if credentials match, False otherwise.
+    """
+    raw = headers.get("proxy-authorization", "")
+    if not raw.lower().startswith("basic "):
+        return False
+    return raw[6:].strip() == _EXPECTED_CRED
+
 
 # ── round-robin state ─────────────────────────────────────────────────────────
 _gw_lock  = threading.Lock()
@@ -200,6 +228,12 @@ def handle(client: socket.socket, addr: tuple):
         if not parsed:
             return
         method, target, headers, body = parsed
+
+        # ── auth gate ─────────────────────────────────────────────────────────
+        if not _auth_ok(headers):
+            client.sendall(_407)
+            log.warning(f"[auth fail] {addr[0]} {method} {target}")
+            return
 
         if method == "CONNECT":
             host, _, port = target.partition(":")
